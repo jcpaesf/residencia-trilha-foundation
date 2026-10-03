@@ -7,6 +7,12 @@ export const getProductsRepository = async (): Promise<ProductsRepository> => {
   if (repository) return repository;
 
   const dataSource = (process.env.DATA_SOURCE ?? "mock").toLowerCase();
+  if (dataSource === "dynamodb") {
+    const { DynamoDbProductsRepository } = await import("./dynamodb-products-repository.js");
+    repository = new DynamoDbProductsRepository();
+    return repository;
+  }
+
   if (dataSource === "mock") {
     repository = new MockProductsRepository();
     return repository;

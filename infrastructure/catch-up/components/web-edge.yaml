@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Componente web-edge do catch-up da Trilha Foundation: frontend estatico em
+  um bucket S3 privado, publicado por CloudFront sem dominio customizado.
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: ManagedBy
+          Value: residencia-catch-up
+        - Key: Component
+          Value: web-edge
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: !Sub "Acesso privado ao frontend de ${AWS::StackName}"
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "Catch-up web-edge - ${AWS::StackName}"
+        CustomErrorResponses:
+          - ErrorCachingMinTTL: 0
+            ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCachingMinTTL: 0
+            ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          TargetOriginId: frontend-s3
+          ViewerProtocolPolicy: redirect-to-https
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2and3
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: frontend-s3
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        PriceClass: PriceClass_100
+      Tags:
+        - Key: ManagedBy
+          Value: residencia-catch-up
+        - Key: Component
+          Value: web-edge
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+Outputs:
+  FrontendBucketName:
+    Description: Bucket que recebe os arquivos gerados pelo Vite.
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: ID usado para invalidar o cache depois de uma publicacao.
+    Value: !Ref FrontendDistribution
+  FrontendUrl:
+    Description: URL publica do frontend, sem dominio customizado.
+    Value: !Sub "https://${FrontendDistribution.DomainName}"

@@ -1,6 +1,8 @@
 export type OrderEvent = {
   orderId: string;
   buyerId: string;
+  buyerName?: string;
+  buyerEmail?: string;
   sellerId: string;
   productId: string;
   quantity: number;

@@ -1,9 +1,0 @@
-name: complete
-description: Implementação oficial completa da residência
-stacks:
-  "01-web-edge": true
-  "02-identity": true
-  "03-marketplace-api": true
-  "04-database": true
-  "05-container-platform": true
-  "06-gitops": true

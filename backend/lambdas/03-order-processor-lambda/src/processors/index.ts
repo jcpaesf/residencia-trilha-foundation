@@ -7,6 +7,12 @@ export const getOrderProcessor = async (): Promise<OrderProcessor> => {
   if (processor) return processor;
 
   const dataSource = (process.env.DATA_SOURCE ?? "mock").toLowerCase();
+  if (dataSource === "dynamodb") {
+    const { DynamoDbOrderProcessor } = await import("./dynamodb-order-processor.js");
+    processor = new DynamoDbOrderProcessor();
+    return processor;
+  }
+
   if (dataSource === "mock") {
     processor = new MockOrderProcessor();
     return processor;

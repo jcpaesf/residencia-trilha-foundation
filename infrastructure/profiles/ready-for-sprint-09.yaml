@@ -1,9 +1,0 @@
-name: ready-for-sprint-09
-description: Ambiente equivalente ao final da Sprint 8
-stacks:
-  "01-web-edge": true
-  "02-identity": true
-  "03-marketplace-api": true
-  "04-database": true
-  "05-container-platform": false
-  "06-gitops": false

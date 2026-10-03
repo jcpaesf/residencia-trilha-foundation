@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
-  APIGatewayProxyEventV2,
-  APIGatewayProxyResultV2,
+  APIGatewayProxyEvent,
+  APIGatewayProxyResult,
 } from "aws-lambda";
 import { getProductsRepository } from "./repositories/index.js";
 import type { ProductInput } from "./repositories/types.js";
@@ -15,10 +15,10 @@ type ProductRequest = {
   description?: string;
   priceCents?: number;
   stock?: number;
-  image?: {
+  images?: Array<{
     fileName?: string;
     contentType?: string;
-  };
+  }>;
 };
 
 type JwtClaims = Record<string, unknown>;
@@ -34,13 +34,18 @@ class HttpError extends Error {
 
 const s3 = new S3Client({});
 
-const json = (statusCode: number, body: JsonBody): APIGatewayProxyResultV2 => ({
+const json = (statusCode: number, body: JsonBody): APIGatewayProxyResult => ({
   statusCode,
-  headers: { "content-type": "application/json" },
+  headers: {
+    "content-type": "application/json",
+    "access-control-allow-origin": process.env.ALLOWED_ORIGIN ?? "*",
+    "access-control-allow-headers": "Content-Type,Authorization",
+    "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+  },
   body: JSON.stringify(body),
 });
 
-const parseBody = (event: APIGatewayProxyEventV2): ProductRequest => {
+const parseBody = (event: APIGatewayProxyEvent): ProductRequest => {
   if (!event.body) return {};
 
   return JSON.parse(
@@ -50,111 +55,151 @@ const parseBody = (event: APIGatewayProxyEventV2): ProductRequest => {
   ) as ProductRequest;
 };
 
-const claimsFrom = (event: APIGatewayProxyEventV2): JwtClaims => {
-  const requestContext = event.requestContext as unknown as {
-    authorizer?: { jwt?: { claims?: JwtClaims } };
-  };
-  const authorizer = requestContext.authorizer;
-  return authorizer?.jwt?.claims ?? {};
+const claimsFrom = (event: APIGatewayProxyEvent): JwtClaims => {
+  const claims = event.requestContext.authorizer?.claims;
+  return (claims ?? {}) as JwtClaims;
 };
 
-const groupsFrom = (claims: JwtClaims): string[] => {
-  const value = claims["cognito:groups"];
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
-  if (typeof value !== "string") return [];
-
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [value];
-  } catch {
-    return value.split(/[ ,]+/).filter(Boolean);
-  }
-};
-
-const requireSeller = (event: APIGatewayProxyEventV2): string => {
+const requireUser = (event: APIGatewayProxyEvent): string => {
   const claims = claimsFrom(event);
-  if (!groupsFrom(claims).includes("seller")) {
-    throw new HttpError("Only sellers can create products.", 403);
-  }
-
   if (typeof claims.sub !== "string") {
-    throw new HttpError("Seller identity is missing.", 401);
+    throw new HttpError("Authenticated user identity is missing.", 401);
   }
-
   return claims.sub;
 };
 
 const safeFileName = (value: string): string => value.replace(/[^a-zA-Z0-9._-]/g, "-");
 
-const createImageUpload = async ({
+const validateProduct = (input: ProductRequest) => {
+  if (!input.name || !Number.isInteger(input.priceCents) || (input.priceCents ?? 0) <= 0
+    || !Number.isInteger(input.stock) || (input.stock ?? -1) < 0) {
+    throw new HttpError("name, a positive priceCents and a non-negative stock are required.", 400);
+  }
+};
+
+const productIdFrom = (path?: string | null): string | null => {
+  if (!path) return null;
+  const match = path.match(/^\/products\/([^/]+)$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+};
+
+const createImageUploads = async ({
   productId,
   sellerId,
-  image,
+  images,
 }: {
   productId: string;
   sellerId: string;
-  image?: ProductRequest["image"];
+  images?: ProductRequest["images"];
 }) => {
-  if (!image?.fileName) return null;
+  const validImages = (images ?? []).filter((image) => image.fileName).slice(0, 8);
+  if (validImages.length === 0) return [];
 
   const bucket = process.env.PRODUCT_IMAGES_BUCKET;
   if (!bucket) throw new Error("PRODUCT_IMAGES_BUCKET is required for image uploads.");
 
-  const key = `${sellerId}/${productId}/${safeFileName(image.fileName)}`;
   const expiresIn = Number(process.env.UPLOAD_URL_TTL_SECONDS ?? 900);
-  const command = new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    ContentType: image.contentType ?? "application/octet-stream",
-  });
+  return Promise.all(validImages.map(async (image) => {
+    const key = `${sellerId}/${productId}/${randomUUID()}-${safeFileName(image.fileName as string)}`;
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: image.contentType ?? "application/octet-stream",
+    });
+    return { bucket, key, expiresIn, uploadUrl: await getSignedUrl(s3, command, { expiresIn }) };
+  }));
+};
 
+const withImageUrls = async <T extends { imageKeys: string[]; imageKey?: string | null }>(product: T) => {
+  const imageKeys = product.imageKeys?.length ? product.imageKeys : product.imageKey ? [product.imageKey] : [];
+  if (imageKeys.length === 0) return { ...product, imageKeys: [], imageUrls: [] };
+  const bucket = process.env.PRODUCT_IMAGES_BUCKET;
+  if (!bucket) return { ...product, imageKeys, imageUrls: [] };
+  const expiresIn = Number(process.env.DOWNLOAD_URL_TTL_SECONDS ?? 3600);
   return {
-    bucket,
-    key,
-    expiresIn,
-    uploadUrl: await getSignedUrl(s3, command, { expiresIn }),
+    ...product,
+    imageKeys,
+    imageUrls: await Promise.all(imageKeys.map((key) => getSignedUrl(
+      s3, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn },
+    ))),
   };
 };
 
 export const handler = async (
-  event: APIGatewayProxyEventV2,
-): Promise<APIGatewayProxyResultV2> => {
+  event: APIGatewayProxyEvent,
+): Promise<APIGatewayProxyResult> => {
   try {
-    const method = event.requestContext.http.method;
-    const path = event.rawPath;
+    const method = event.httpMethod;
+    const path = event.path;
+    if (!method || !path) {
+      throw new Error("API Gateway Lambda proxy integration is required.");
+    }
     const repository = await getProductsRepository();
 
     if (method === "GET" && path === "/products") {
-      return json(200, { items: await repository.list() });
+      requireUser(event);
+      const products = await repository.list();
+      return json(200, { items: await Promise.all(products.map(withImageUrls)) });
     }
 
     if (method === "POST" && path === "/products") {
-      const sellerId = requireSeller(event);
+      const sellerId = requireUser(event);
       const input = parseBody(event);
-      if (!input.name || !Number.isInteger(input.priceCents) || !Number.isInteger(input.stock)) {
-        return json(400, { message: "name, priceCents and stock are required." });
-      }
+      validateProduct(input);
 
       const id = randomUUID();
-      const imageUpload = await createImageUpload({
+      const imageUploads = await createImageUploads({
         productId: id,
         sellerId,
-        image: input.image,
+        images: input.images,
       });
       const product: ProductInput = {
         id,
-        name: input.name,
+        name: input.name as string,
         description: input.description ?? "",
         priceCents: input.priceCents as number,
         stock: input.stock as number,
         sellerId,
-        imageKey: imageUpload?.key ?? null,
+        imageKeys: imageUploads.map((upload) => upload.key),
         createdAt: new Date().toISOString(),
       };
 
-      return json(201, { product: await repository.create(product), imageUpload });
+      return json(201, { product: await withImageUrls(await repository.create(product)), imageUploads });
+    }
+
+    const productId = productIdFrom(path);
+    if (productId && method === "PUT") {
+      const userId = requireUser(event);
+      const current = await repository.findById(productId);
+      if (!current) throw new HttpError("Product not found.", 404);
+      if (current.sellerId !== userId) throw new HttpError("You can only edit your own products.", 403);
+      const input = parseBody(event);
+      validateProduct(input);
+      const imageUploads = await createImageUploads({ productId, sellerId: userId, images: input.images });
+      const updated: ProductInput = {
+        ...current,
+        name: input.name as string,
+        description: input.description ?? "",
+        priceCents: input.priceCents as number,
+        stock: input.stock as number,
+        imageKeys: [...current.imageKeys, ...imageUploads.map((upload) => upload.key)].slice(0, 8),
+      };
+      return json(200, { product: await withImageUrls(await repository.update(updated)), imageUploads });
+    }
+
+    if (productId && method === "DELETE") {
+      const userId = requireUser(event);
+      const current = await repository.findById(productId);
+      if (!current) throw new HttpError("Product not found.", 404);
+      if (current.sellerId !== userId) throw new HttpError("You can only remove your own products.", 403);
+      await repository.remove(productId);
+      if (current.imageKeys.length > 0 && process.env.PRODUCT_IMAGES_BUCKET) {
+        await Promise.all(current.imageKeys.map((key) => s3.send(new DeleteObjectCommand({
+          Bucket: process.env.PRODUCT_IMAGES_BUCKET,
+          Key: key,
+        }))));
+      }
+      return json(200, { removed: true });
     }
 
     return json(404, { message: "Route not found." });

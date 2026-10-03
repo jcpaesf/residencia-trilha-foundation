@@ -11,7 +11,9 @@ public sealed record SellerOrder(
     string ProductId,
     int Quantity,
     string Status,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    string? BuyerName = null,
+    string? BuyerEmail = null
 );
 
 public sealed record OrderCreatedEvent(
@@ -21,5 +23,7 @@ public sealed record OrderCreatedEvent(
     string ProductId,
     int Quantity,
     DateTimeOffset OccurredAt,
-    string IdempotencyKey
+    string IdempotencyKey,
+    string? BuyerName = null,
+    string? BuyerEmail = null
 );

@@ -1,9 +1,0 @@
-name: ready-for-sprint-11
-description: Ambiente equivalente ao final da Sprint 10
-stacks:
-  "01-web-edge": true
-  "02-identity": true
-  "03-marketplace-api": true
-  "04-database": true
-  "05-container-platform": true
-  "06-gitops": false

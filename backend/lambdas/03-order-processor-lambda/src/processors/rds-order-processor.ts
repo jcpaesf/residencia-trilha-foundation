@@ -12,6 +12,7 @@ const pool = new Pool({
 });
 
 type StockRow = QueryResultRow & { stock: number };
+type OrderRow = QueryResultRow & { id: string; status: string };
 
 export class RdsOrderProcessor implements OrderProcessor {
   async process(order: OrderEvent): Promise<ProcessingResult> {
@@ -19,11 +20,11 @@ export class RdsOrderProcessor implements OrderProcessor {
     try {
       await client.query("BEGIN");
 
-      const duplicate = await client.query(
-        "SELECT id FROM orders WHERE idempotency_key = $1 FOR UPDATE",
+      const existing = await client.query<OrderRow>(
+        "SELECT id, status FROM orders WHERE idempotency_key = $1 FOR UPDATE",
         [order.idempotencyKey],
       );
-      if ((duplicate.rowCount ?? 0) > 0) {
+      if (existing.rows[0]?.status === "processed") {
         await client.query("ROLLBACK");
         return { status: "duplicate", orderId: order.orderId };
       }
@@ -41,24 +42,31 @@ export class RdsOrderProcessor implements OrderProcessor {
         throw new Error(`Insufficient stock for product ${order.productId}.`);
       }
 
-      await client.query(
-        `
-          INSERT INTO orders (
-            id, buyer_id, seller_id, product_id, quantity, status,
-            idempotency_key, created_at
-          )
-          VALUES ($1, $2, $3, $4, $5, 'processed', $6, $7)
-        `,
-        [
-          order.orderId,
-          order.buyerId,
-          order.sellerId,
-          order.productId,
-          order.quantity,
-          order.idempotencyKey,
-          order.occurredAt,
-        ],
-      );
+      if ((existing.rowCount ?? 0) > 0) {
+        await client.query(
+          "UPDATE orders SET status = 'processed' WHERE idempotency_key = $1 AND status = 'pending'",
+          [order.idempotencyKey],
+        );
+      } else {
+        await client.query(
+          `
+            INSERT INTO orders (
+              id, buyer_id, seller_id, product_id, quantity, status,
+              idempotency_key, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, 'processed', $6, $7)
+          `,
+          [
+            order.orderId,
+            order.buyerId,
+            order.sellerId,
+            order.productId,
+            order.quantity,
+            order.idempotencyKey,
+            order.occurredAt,
+          ],
+        );
+      }
 
       await client.query("COMMIT");
       return {

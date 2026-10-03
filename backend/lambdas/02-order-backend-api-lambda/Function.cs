@@ -34,20 +34,23 @@ public sealed class Function
         _queueUrl = queueUrl;
     }
 
-    public async Task<APIGatewayHttpApiV2ProxyResponse> FunctionHandler(
-        APIGatewayHttpApiV2ProxyRequest request,
+    public async Task<APIGatewayProxyResponse> FunctionHandler(
+        APIGatewayProxyRequest request,
         ILambdaContext context
     )
     {
         try
         {
-            var method = request.RequestContext.Http.Method;
-            var path = request.RawPath;
-            var claims = request.RequestContext.Authorizer?.Jwt?.Claims
+            var method = request.HttpMethod;
+            var path = request.Path;
+            var claims = request.RequestContext.Authorizer?.Claims
                 ?? new Dictionary<string, string>();
 
             if (method == "POST" && path == "/orders")
                 return await CreateOrder(request, claims);
+
+            if (method == "GET" && path == "/orders")
+                return await ListBuyerOrders(claims);
 
             if (method == "GET" && path == "/seller/orders")
                 return await ListSellerOrders(claims);
@@ -65,14 +68,11 @@ public sealed class Function
         }
     }
 
-    private async Task<APIGatewayHttpApiV2ProxyResponse> CreateOrder(
-        APIGatewayHttpApiV2ProxyRequest request,
+    private async Task<APIGatewayProxyResponse> CreateOrder(
+        APIGatewayProxyRequest request,
         IDictionary<string, string> claims
     )
     {
-        if (!HasGroup(claims, "buyer"))
-            return Json(403, new { message = "Only buyers can create orders." });
-
         var input = JsonSerializer.Deserialize<CreateOrderRequest>(request.Body ?? "{}", JsonOptions);
         if (input is null || string.IsNullOrWhiteSpace(input.ProductId) || input.Quantity <= 0)
             return Json(400, new { message = "productId and a positive quantity are required." });
@@ -82,15 +82,36 @@ public sealed class Function
         if (product.Stock < input.Quantity) return Json(409, new { message = "Insufficient stock." });
 
         var orderId = Guid.NewGuid().ToString();
+        var createdAt = DateTimeOffset.UtcNow;
+        var buyerId = RequiredClaim(claims, "sub");
+        var buyerEmail = OptionalClaim(claims, "email");
+        var buyerName = OptionalClaim(claims, "name")
+            ?? OptionalClaim(claims, "given_name")
+            ?? NameFromEmail(buyerEmail);
         var orderEvent = new OrderCreatedEvent(
             orderId,
-            RequiredClaim(claims, "sub"),
+            buyerId,
             product.SellerId,
             product.Id,
             input.Quantity,
-            DateTimeOffset.UtcNow,
-            orderId
+            createdAt,
+            orderId,
+            buyerName,
+            buyerEmail
         );
+        var pendingOrder = new SellerOrder(
+            orderEvent.OrderId,
+            orderEvent.BuyerId,
+            orderEvent.SellerId,
+            orderEvent.ProductId,
+            orderEvent.Quantity,
+            "pending",
+            createdAt,
+            buyerName,
+            buyerEmail
+        );
+
+        await _repository.CreatePendingOrder(pendingOrder, orderEvent.IdempotencyKey);
 
         await _sqs.SendMessageAsync(new SendMessageRequest
         {
@@ -98,34 +119,56 @@ public sealed class Function
             MessageBody = JsonSerializer.Serialize(orderEvent, JsonOptions),
         });
 
-        return Json(202, new { orderId, status = "accepted" });
+        return Json(202, new { orderId, status = "pending", order = pendingOrder });
     }
 
-    private async Task<APIGatewayHttpApiV2ProxyResponse> ListSellerOrders(
+    private async Task<APIGatewayProxyResponse> ListSellerOrders(
         IDictionary<string, string> claims
     )
     {
-        if (!HasGroup(claims, "seller"))
-            return Json(403, new { message = "Only sellers can list their orders." });
-
         var orders = await _repository.ListSellerOrders(RequiredClaim(claims, "sub"));
         return Json(200, new { items = orders });
     }
 
-    private static bool HasGroup(IDictionary<string, string> claims, string group) =>
-        claims.TryGetValue("cognito:groups", out var value)
-        && value.Split([',', ' ', '[', ']', '"'], StringSplitOptions.RemoveEmptyEntries)
-            .Contains(group, StringComparer.OrdinalIgnoreCase);
+    private async Task<APIGatewayProxyResponse> ListBuyerOrders(
+        IDictionary<string, string> claims
+    )
+    {
+        var orders = await _repository.ListBuyerOrders(RequiredClaim(claims, "sub"));
+        return Json(200, new { items = orders });
+    }
 
     private static string RequiredClaim(IDictionary<string, string> claims, string name) =>
         claims.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)
             ? value
             : throw new InvalidOperationException($"JWT claim {name} is required.");
 
-    private static APIGatewayHttpApiV2ProxyResponse Json(int statusCode, object body) => new()
+    private static string? OptionalClaim(IDictionary<string, string> claims, string name) =>
+        claims.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value.Trim()
+            : null;
+
+    private static string? NameFromEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        var localPart = email.Split('@', 2)[0];
+        return string.Join(
+            " ",
+            localPart.Split(['.', '_', '-'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(part => char.ToUpperInvariant(part[0]) + part[1..])
+        );
+    }
+
+    private static APIGatewayProxyResponse Json(int statusCode, object body) => new()
     {
         StatusCode = statusCode,
-        Headers = new Dictionary<string, string> { ["content-type"] = "application/json" },
+        Headers = new Dictionary<string, string>
+        {
+            ["content-type"] = "application/json",
+            ["access-control-allow-origin"] = Environment.GetEnvironmentVariable("ALLOWED_ORIGIN") ?? "*",
+            ["access-control-allow-headers"] = "Content-Type,Authorization",
+            ["access-control-allow-methods"] = "GET,POST,PUT,DELETE,OPTIONS",
+        },
         Body = JsonSerializer.Serialize(body, JsonOptions),
     };
 }

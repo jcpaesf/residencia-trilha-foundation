@@ -1,9 +1,0 @@
-name: ready-for-sprint-01
-description: Ponto inicial da residência
-stacks:
-  "01-web-edge": false
-  "02-identity": false
-  "03-marketplace-api": false
-  "04-database": false
-  "05-container-platform": false
-  "06-gitops": false

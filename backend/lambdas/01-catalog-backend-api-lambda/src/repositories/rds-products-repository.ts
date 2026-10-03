@@ -29,7 +29,7 @@ const mapProduct = (row: ProductRow): Product => ({
   priceCents: row.price_cents,
   stock: row.stock,
   sellerId: row.seller_id,
-  imageKey: row.image_key,
+  imageKeys: row.image_key ? [row.image_key] : [],
   createdAt: row.created_at.toISOString(),
 });
 
@@ -60,11 +60,31 @@ export class RdsProductsRepository implements ProductsRepository {
         product.priceCents,
         product.stock,
         product.sellerId,
-        product.imageKey,
+        product.imageKeys[0] ?? null,
         product.createdAt,
       ],
     );
 
     return mapProduct(result.rows[0]);
+  }
+
+  async findById(productId: string): Promise<Product | null> {
+    const result = await pool.query<ProductRow>(
+      `SELECT id, name, description, price_cents, stock, seller_id, image_key, created_at FROM products WHERE id = $1`,
+      [productId],
+    );
+    return result.rows[0] ? mapProduct(result.rows[0]) : null;
+  }
+
+  async update(product: Product): Promise<Product> {
+    const result = await pool.query<ProductRow>(
+      `UPDATE products SET name = $2, description = $3, price_cents = $4, stock = $5, image_key = $6 WHERE id = $1 RETURNING id, name, description, price_cents, stock, seller_id, image_key, created_at`,
+      [product.id, product.name, product.description, product.priceCents, product.stock, product.imageKeys[0] ?? null],
+    );
+    return mapProduct(result.rows[0]);
+  }
+
+  async remove(productId: string): Promise<void> {
+    await pool.query("DELETE FROM products WHERE id = $1", [productId]);
   }
 }

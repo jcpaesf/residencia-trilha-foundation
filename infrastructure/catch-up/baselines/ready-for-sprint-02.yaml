@@ -1,0 +1,5 @@
+name: ready-for-sprint-02
+description: Ambiente funcional equivalente ao final da Sprint 1
+components:
+  - web-edge
+publish_frontend: true
