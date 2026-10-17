@@ -1,22 +1,35 @@
 import { Pool, type QueryResultRow } from "pg";
+import { getDatabaseSecret } from "../database-secret.js";
 import type { OrderEvent, OrderProcessor, ProcessingResult } from "./types.js";
 
-const pool = new Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT ?? 5432),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
-  max: 2,
-});
+let pool: Promise<Pool> | undefined;
+
+const required = (name: string): string => {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required when DATA_SOURCE=rds.`);
+  return value;
+};
+
+const getPool = (): Promise<Pool> => {
+  if (pool) return pool;
+  pool = getDatabaseSecret().then((secret) => new Pool({
+    host: required("DB_HOST"),
+    port: Number(process.env.DB_PORT ?? 5432),
+    database: required("DB_NAME"),
+    user: secret.username,
+    password: secret.password,
+    ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+    max: 2,
+  }));
+  return pool;
+};
 
 type StockRow = QueryResultRow & { stock: number };
 type OrderRow = QueryResultRow & { id: string; status: string };
 
 export class RdsOrderProcessor implements OrderProcessor {
   async process(order: OrderEvent): Promise<ProcessingResult> {
-    const client = await pool.connect();
+    const client = await (await getPool()).connect();
     try {
       await client.query("BEGIN");
 
@@ -52,9 +65,9 @@ export class RdsOrderProcessor implements OrderProcessor {
           `
             INSERT INTO orders (
               id, buyer_id, seller_id, product_id, quantity, status,
-              idempotency_key, created_at
+              idempotency_key, buyer_name, buyer_email, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, 'processed', $6, $7)
+            VALUES ($1, $2, $3, $4, $5, 'processed', $6, $7, $8, $9)
           `,
           [
             order.orderId,
@@ -63,6 +76,8 @@ export class RdsOrderProcessor implements OrderProcessor {
             order.productId,
             order.quantity,
             order.idempotencyKey,
+            order.buyerName ?? null,
+            order.buyerEmail ?? null,
             order.occurredAt,
           ],
         );

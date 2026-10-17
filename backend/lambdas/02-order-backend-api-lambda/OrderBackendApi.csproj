@@ -16,6 +16,7 @@
     <PackageReference Include="Amazon.Lambda.Serialization.SystemTextJson" Version="2.*" />
     <PackageReference Include="AWSSDK.SQS" Version="4.*" />
     <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.*" />
+    <PackageReference Include="AWSSDK.SecretsManager" Version="4.*" />
     <PackageReference Include="Npgsql" Version="8.*" />
   </ItemGroup>
 </Project>

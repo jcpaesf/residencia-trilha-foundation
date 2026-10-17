@@ -4,12 +4,9 @@ namespace Residencia.Foundation.Orders.Data;
 
 public sealed class RdsCommerceRepository : ICommerceRepository
 {
-    private readonly string _connectionString = BuildConnectionString();
-
     public async Task<ProductReference?> FindProduct(string productId)
     {
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenConnection();
         await using var command = new NpgsqlCommand(
             "SELECT id, seller_id, stock FROM products WHERE id = @id",
             connection
@@ -27,15 +24,14 @@ public sealed class RdsCommerceRepository : ICommerceRepository
 
     public async Task CreatePendingOrder(SellerOrder order, string idempotencyKey)
     {
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenConnection();
         await using var command = new NpgsqlCommand(
             """
             INSERT INTO orders (
                 id, buyer_id, seller_id, product_id, quantity, status,
-                idempotency_key, created_at
+                idempotency_key, buyer_name, buyer_email, created_at
             )
-            VALUES (@id, @buyerId, @sellerId, @productId, @quantity, 'pending', @idempotencyKey, @createdAt)
+            VALUES (@id, @buyerId, @sellerId, @productId, @quantity, 'pending', @idempotencyKey, @buyerName, @buyerEmail, @createdAt)
             """,
             connection
         );
@@ -45,17 +41,18 @@ public sealed class RdsCommerceRepository : ICommerceRepository
         command.Parameters.AddWithValue("productId", order.ProductId);
         command.Parameters.AddWithValue("quantity", order.Quantity);
         command.Parameters.AddWithValue("idempotencyKey", idempotencyKey);
+        command.Parameters.AddWithValue("buyerName", (object?)order.BuyerName ?? DBNull.Value);
+        command.Parameters.AddWithValue("buyerEmail", (object?)order.BuyerEmail ?? DBNull.Value);
         command.Parameters.AddWithValue("createdAt", order.CreatedAt);
         await command.ExecuteNonQueryAsync();
     }
 
     public async Task<IReadOnlyList<SellerOrder>> ListSellerOrders(string sellerId)
     {
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenConnection();
         await using var command = new NpgsqlCommand(
             """
-            SELECT id, buyer_id, seller_id, product_id, quantity, status, created_at
+            SELECT id, buyer_id, seller_id, product_id, quantity, status, created_at, buyer_name, buyer_email
             FROM orders
             WHERE seller_id = @sellerId
             ORDER BY created_at DESC
@@ -75,7 +72,9 @@ public sealed class RdsCommerceRepository : ICommerceRepository
                 reader.GetString(3),
                 reader.GetInt32(4),
                 reader.GetString(5),
-                reader.GetFieldValue<DateTimeOffset>(6)
+                reader.GetFieldValue<DateTimeOffset>(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)
             ));
         }
 
@@ -84,11 +83,10 @@ public sealed class RdsCommerceRepository : ICommerceRepository
 
     public async Task<IReadOnlyList<SellerOrder>> ListBuyerOrders(string buyerId)
     {
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await OpenConnection();
         await using var command = new NpgsqlCommand(
             """
-            SELECT id, buyer_id, seller_id, product_id, quantity, status, created_at
+            SELECT id, buyer_id, seller_id, product_id, quantity, status, created_at, buyer_name, buyer_email
             FROM orders
             WHERE buyer_id = @buyerId
             ORDER BY created_at DESC
@@ -103,26 +101,31 @@ public sealed class RdsCommerceRepository : ICommerceRepository
             orders.Add(new SellerOrder(
                 reader.GetString(0), reader.GetString(1), reader.GetString(2),
                 reader.GetString(3), reader.GetInt32(4), reader.GetString(5),
-                reader.GetFieldValue<DateTimeOffset>(6)
+                reader.GetFieldValue<DateTimeOffset>(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)
             ));
         }
         return orders;
     }
 
-    private static string BuildConnectionString()
+    private static async Task<NpgsqlConnection> OpenConnection()
     {
+        var secret = await DatabaseSecretProvider.Get();
         var builder = new NpgsqlConnectionStringBuilder
         {
             Host = Required("DB_HOST"),
             Port = int.Parse(Environment.GetEnvironmentVariable("DB_PORT") ?? "5432"),
             Database = Required("DB_NAME"),
-            Username = Required("DB_USER"),
-            Password = Required("DB_PASSWORD"),
+            Username = secret.Username,
+            Password = secret.Password,
             SslMode = Environment.GetEnvironmentVariable("DB_SSL") == "true"
                 ? SslMode.Require
                 : SslMode.Disable,
         };
-        return builder.ConnectionString;
+        var connection = new NpgsqlConnection(builder.ConnectionString);
+        await connection.OpenAsync();
+        return connection;
     }
 
     private static string Required(string name) =>

@@ -9,6 +9,7 @@ Uso:
 
 Baseline disponivel:
   ready-for-sprint-02  Prepara o resultado funcional da Sprint 1
+  ready-for-sprint-03  Prepara o resultado funcional da Sprint 2
 
 Alias temporario:
   sprint-01            Compatibilidade com a primeira versao do script
@@ -17,9 +18,11 @@ Variaveis opcionais:
   AWS_PROFILE            Profile configurado na AWS CLI
   AWS_REGION             Regiao das stacks (padrao: us-east-1)
   CATCH_UP_STACK_PREFIX  Prefixo das stacks (padrao: residencia-foundation-catch-up)
+  CATCH_UP_ARTIFACTS_BUCKET  Bucket de pacotes das Lambdas (opcional)
 
 Exemplos:
   AWS_PROFILE=aluno ./infrastructure/catch-up/bootstrap.sh apply ready-for-sprint-02
+  AWS_PROFILE=aluno ./infrastructure/catch-up/bootstrap.sh apply ready-for-sprint-03
   AWS_PROFILE=aluno ./infrastructure/catch-up/bootstrap.sh status ready-for-sprint-02
   AWS_PROFILE=aluno ./infrastructure/catch-up/bootstrap.sh destroy ready-for-sprint-02
 EOF
@@ -52,6 +55,7 @@ repository_dir="$(cd "${script_dir}/../.." && pwd)"
 baseline_path="${script_dir}/baselines/${baseline}.yaml"
 region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 stack_prefix="${CATCH_UP_STACK_PREFIX:-residencia-foundation-catch-up}"
+artifacts_bucket="${CATCH_UP_ARTIFACTS_BUCKET:-}"
 
 [[ -f "$baseline_path" ]] || fail "baseline nao encontrado: $baseline"
 
@@ -208,20 +212,98 @@ run_with_stack_events() {
 apply_component() {
   local component="$1"
   local template_path="${script_dir}/components/${component}.yaml"
+  local deploy_template="$template_path"
   local stack_name
+  local packaged_template=""
+  local allowed_origin=""
   stack_name="$(component_stack_name "$component")"
 
   [[ -f "$template_path" ]] || fail "componente nao encontrado: $component"
 
-  echo "Criando ou atualizando o componente $component..."
-  run_with_stack_events "$stack_name" \
-    aws cloudformation deploy \
-      --stack-name "$stack_name" \
+  recover_failed_stack "$stack_name"
+
+  if [[ "$component" == "marketplace-backend" ]]; then
+    prepare_backend_packages
+    ensure_artifacts_bucket
+    packaged_template="$(mktemp "${TMPDIR:-/tmp}/residencia-marketplace-backend.XXXXXX")"
+    aws cloudformation package \
       --template-file "$template_path" \
-      --no-fail-on-empty-changeset \
-      --tags ManagedBy=residencia-catch-up Baseline="$baseline" Component="$component" \
-      "${aws_args[@]}"
+      --s3-bucket "$artifacts_bucket" \
+      --output-template-file "$packaged_template" \
+      "${aws_args[@]}" >/dev/null
+    deploy_template="$packaged_template"
+    allowed_origin="$(stack_output "$(component_stack_name web-edge)" FrontendUrl)"
+  fi
+
+  echo "Criando ou atualizando o componente $component..."
+  if [[ "$component" == "marketplace-backend" ]]; then
+    run_with_stack_events "$stack_name" \
+      aws cloudformation deploy \
+        --stack-name "$stack_name" \
+        --template-file "$deploy_template" \
+        --parameter-overrides "AllowedOrigin=${allowed_origin}" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+        --no-fail-on-empty-changeset \
+        --tags ManagedBy=residencia-catch-up Baseline="$baseline" Component="$component" \
+        "${aws_args[@]}"
+    rm -f "$packaged_template"
+  else
+    run_with_stack_events "$stack_name" \
+      aws cloudformation deploy \
+        --stack-name "$stack_name" \
+        --template-file "$deploy_template" \
+        --no-fail-on-empty-changeset \
+        --tags ManagedBy=residencia-catch-up Baseline="$baseline" Component="$component" \
+        "${aws_args[@]}"
+  fi
   echo "Componente $component pronto."
+}
+
+recover_failed_stack() {
+  local stack_name="$1"
+  local status
+  status="$(aws cloudformation describe-stacks \
+    --stack-name "$stack_name" \
+    --query 'Stacks[0].StackStatus' \
+    --output text \
+    "${aws_args[@]}" 2>/dev/null || true)"
+
+  if [[ "$status" == "ROLLBACK_COMPLETE" ]]; then
+    echo "A stack $stack_name ficou em ROLLBACK_COMPLETE. Removendo antes de tentar novamente..."
+    delete_stack_and_wait "$stack_name"
+  fi
+}
+
+prepare_backend_packages() {
+  command -v npm >/dev/null 2>&1 || fail "npm nao encontrado"
+  command -v dotnet >/dev/null 2>&1 || fail "dotnet nao encontrado"
+  command -v zip >/dev/null 2>&1 || fail "zip nao encontrado"
+  echo "Empacotando as tres Lambdas da Sprint 2..."
+  "${repository_dir}/backend/package.sh"
+}
+
+ensure_artifacts_bucket() {
+  local account_id
+  account_id="$(aws sts get-caller-identity --query Account --output text "${aws_args[@]}")"
+  artifacts_bucket="${artifacts_bucket:-residencia-catchup-artifacts-${account_id}-${region}}"
+
+  if aws s3api head-bucket --bucket "$artifacts_bucket" "${aws_args[@]}" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "Criando bucket de artefatos $artifacts_bucket..."
+  if [[ "$region" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "$artifacts_bucket" "${aws_args[@]}" >/dev/null
+  else
+    aws s3api create-bucket \
+      --bucket "$artifacts_bucket" \
+      --create-bucket-configuration "LocationConstraint=${region}" \
+      "${aws_args[@]}" >/dev/null
+  fi
+  aws s3api put-bucket-versioning \
+    --bucket "$artifacts_bucket" \
+    --versioning-configuration Status=Enabled \
+    "${aws_args[@]}"
 }
 
 show_status() {
@@ -243,6 +325,11 @@ show_status() {
   if grep -qx "web-edge" <<< "$components"; then
     stack_name="$(component_stack_name web-edge)"
     echo "Frontend: $(stack_output "$stack_name" FrontendUrl)"
+  fi
+  if grep -qx "marketplace-backend" <<< "$components"; then
+    stack_name="$(component_stack_name marketplace-backend)"
+    echo "API: $(stack_output "$stack_name" ApiUrl)"
+    echo "Cognito user pool: $(stack_output "$stack_name" UserPoolId)"
   fi
 }
 
@@ -282,9 +369,20 @@ publish_site() {
 
   command -v npm >/dev/null 2>&1 || fail "npm nao encontrado"
 
-  echo "Gerando o frontend em modo local..."
+  echo "Gerando o frontend..."
   npm --prefix "${repository_dir}/site" ci
-  VITE_APP_MODE=mock npm --prefix "${repository_dir}/site" run build
+  if grep -qx "marketplace-backend" <<< "$components"; then
+    local backend_stack_name
+    backend_stack_name="$(component_stack_name marketplace-backend)"
+    VITE_APP_MODE=production \
+    VITE_AWS_REGION="$region" \
+    VITE_COGNITO_USER_POOL_ID="$(stack_output "$backend_stack_name" UserPoolId)" \
+    VITE_COGNITO_CLIENT_ID="$(stack_output "$backend_stack_name" UserPoolClientId)" \
+    VITE_API_URL="$(stack_output "$backend_stack_name" ApiUrl)" \
+      npm --prefix "${repository_dir}/site" run build
+  else
+    VITE_APP_MODE=mock npm --prefix "${repository_dir}/site" run build
+  fi
 
   echo "Publicando os arquivos no S3..."
   aws s3 sync "${repository_dir}/site/dist" "s3://${bucket_name}" \

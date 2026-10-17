@@ -1,0 +1,6 @@
+name: ready-for-sprint-03
+description: Ambiente funcional equivalente ao final da Sprint 2
+components:
+  - web-edge
+  - marketplace-backend
+publish_frontend: true

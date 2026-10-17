@@ -1,9 +1,9 @@
-# Backend do marketplace, Sprint 2
+# Backend do marketplace, Sprints 2 e 3
 
-O backend entrega o fluxo completo de catálogo e pedidos sem antecipar o RDS.
-Na Sprint 2, o estado fica em uma tabela do Amazon DynamoDB e as imagens ficam
-em um bucket S3. A troca futura para PostgreSQL acontece pelos adapters de
-repositório, sem mudar os handlers HTTP.
+O backend entrega o mesmo fluxo de catálogo e pedidos por dois adapters
+explícitos. Na Sprint 2, o estado fica no Amazon DynamoDB. Na Sprint 3,
+`DATA_SOURCE=rds` seleciona PostgreSQL por meio do RDS Proxy. Trocar o adapter
+não muda os handlers HTTP e nunca dispara fallback ou dual write silencioso.
 
 ## Fluxo
 
@@ -117,6 +117,41 @@ DATA_SOURCE=dynamodb
 MARKETPLACE_TABLE_NAME=residencia-foundation-marketplace
 ```
 
+### Modo RDS da Sprint 3
+
+As três Lambdas recebem as variáveis abaixo quando `DATA_SOURCE=rds`. `DB_HOST`
+é sempre o endpoint privado do RDS Proxy. O runtime lê `username` e `password`
+do JSON apontado por `DB_SECRET_ARN`; não configure `DB_USER`, `DB_PASSWORD` ou
+uma connection string completa na função.
+
+```env
+DATA_SOURCE=rds
+DB_HOST=<endpoint-do-rds-proxy>
+DB_PORT=5432
+DB_NAME=marketplace
+DB_SECRET_ARN=<arn-do-secret>
+DB_SSL=true
+```
+
+O schema versionado está em `backend/sql/001_marketplace.sql`. Aplique-o de um
+cliente `psql` com acesso à VPC. O banco e o Proxy permanecem privados.
+
+Para validar localmente o schema e os três adapters RDS com um PostgreSQL 16
+isolado, execute `./backend/test-rds-local.sh`. O teste usa uma credencial local
+somente quando `ALLOW_LOCAL_DB_SECRET=true`; essa opção não deve ser configurada
+nas Lambdas publicadas, que continuam exigindo `DB_SECRET_ARN`.
+
+Depois de aplicar o catch-up da Sprint 2, execute `./backend/test-deployed.sh`
+para validar o ambiente publicado. O teste cria um usuário temporário no
+Cognito, exercita catálogo, upload no S3, criação e processamento do pedido,
+confere a atualização do estoque e remove os dados criados ao terminar.
+
+As Lambdas usam duas subnets privadas. Para preservar o modo DynamoDB e as
+integrações existentes sem NAT, a VPC precisa de Gateway endpoints para S3 e
+DynamoDB e Interface endpoints para SQS e Secrets Manager. Um Internet Gateway
+sozinho não fornece saída IPv4 às ENIs privadas da Lambda e não faz parte do
+desenho obrigatório da Sprint 3.
+
 ## Permissões mínimas
 
 - catálogo: `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:DeleteItem`,
@@ -127,6 +162,8 @@ MARKETPLACE_TABLE_NAME=residencia-foundation-marketplace
 - processadora: `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`,
   `dynamodb:TransactWriteItems` e permissão para consumir a fila por meio do
   event source mapping;
+- modo RDS: `secretsmanager:GetSecretValue` restrito ao secret do banco e as
+  permissões de ENI fornecidas por `AWSLambdaVPCAccessExecutionRole`;
 - CloudWatch Logs para as três funções.
 
 O bucket deve aceitar PUT pelo CORS da origem do frontend, com o cabeçalho

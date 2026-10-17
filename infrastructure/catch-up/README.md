@@ -9,15 +9,29 @@ nem marca a sprint anterior como concluída.
 ```text
 catch-up/
 ├── baselines/                       # pontos de entrada cumulativos
-│   └── ready-for-sprint-02.yaml     # seleciona o resultado da Sprint 1
+│   ├── ready-for-sprint-02.yaml     # seleciona o resultado da Sprint 1
+│   └── ready-for-sprint-03.yaml     # seleciona o resultado da Sprint 2
 ├── components/                      # capacidades reutilizáveis
-│   └── web-edge.yaml                # S3 e CloudFront
+│   ├── web-edge.yaml                # S3 e CloudFront
+│   └── marketplace-backend.yaml     # Cognito, API, Lambdas, DynamoDB e SQS
 └── bootstrap.sh                     # aplica os componentes do baseline
 ```
 
 Um baseline representa o ambiente necessário para entrar em uma sprint. Quando
-os próximos catch-ups forem adicionados, `ready-for-sprint-03` poderá selecionar
-`web-edge` e o componente da API, sem exigir que a pessoa execute dois comandos.
+um baseline possui mais de um componente, o bootstrap aplica todos na ordem
+correta e publica o frontend já configurado para o ambiente criado.
+
+## Entrada na Sprint 3
+
+O baseline `ready-for-sprint-03` reaproveita o `web-edge` e acrescenta o
+resultado funcional da Sprint 2: Cognito, API Gateway REST, três Lambdas,
+DynamoDB, bucket de imagens, SQS e DLQ. O bootstrap empacota o backend, publica
+os artefatos e gera o frontend em modo AWS com os outputs das stacks.
+
+```bash
+AWS_PROFILE=seu-profile \
+  ./infrastructure/catch-up/bootstrap.sh apply ready-for-sprint-03
+```
 
 ## Entrada na Sprint 2
 
