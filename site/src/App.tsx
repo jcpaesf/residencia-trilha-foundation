@@ -157,7 +157,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: Authenticated
         <div className="panel-topline"><span><i /> Acesso seguro</span><span>{environmentLabel}</span></div>
         <div className="panel-content">
           {view === "login" && <form onSubmit={handleLogin} noValidate>
-            <div className="form-heading"><span>Acesso individual</span><h2>Entre na sua conta.</h2><p>Uma conta compra, vende e acompanha pedidos.</p></div>
+            <div className="form-heading"><span>Acesso individual</span><h2>Entre na sua contaasdadasdasda.</h2><p>Uma conta compra, vende e acompanha pedidos.</p></div>
             <Field label="E-mail"><input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="voce@exemplo.com" /></Field>
             <Field label="Senha"><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Digite sua senha" /></Field>
             {notice && <p className="form-notice">{notice}</p>}{error && <p className="form-error">{error}</p>}
