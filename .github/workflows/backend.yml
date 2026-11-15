@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
 
     steps:
@@ -45,8 +45,6 @@ jobs:
 
       - name: Executar testes com PostgreSQL local
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-16
           POSTGRES_BIN=/usr/lib/postgresql/16/bin bash backend/test-rds-local.sh
 
       - name: Registrar versão e hashes dos pacotes
