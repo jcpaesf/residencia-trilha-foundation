@@ -1,5 +1,5 @@
 name: ready-for-sprint-04
-description: Ambiente funcional equivalente ao final da Sprint 3
+description: Ambiente funcional ate a Sprint 3, com DynamoDB por padrao e RDS somente por opt-in
 components:
   - web-edge
   - marketplace-backend

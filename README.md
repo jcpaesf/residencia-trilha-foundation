@@ -19,14 +19,17 @@ residencia-trilha-foundation/
     │   ├── baselines/
     │   └── components/
     └── terraform/                     # IaC criada durante a trilha
-        ├── bootstrap.sh
         ├── foundation/
         └── stacks/
+            ├── 00-remote-backend-stack/ # base do bucket de state
+            └── 01-frontend-stack/      # base do frontend com CDN e domínio
 ```
 
 Catch-up e Terraform possuem ciclos de vida diferentes. O catch-up entrega os
 pré-requisitos para uma pessoa entrar na sprint atual. O diretório Terraform
-recebe apenas as stacks que forem implementadas como parte dos desafios.
+recebe as bases das stacks que serão implementadas como parte dos desafios.
+Na Sprint 5, os arquivos já estão organizados para o mentorado preencher os
+recursos seguindo o passo a passo do Residência App.
 
 | Necessidade | Caminho | Ferramenta |
 | --- | --- | --- |
@@ -34,8 +37,8 @@ recebe apenas as stacks que forem implementadas como parte dos desafios.
 | Executar os desafios atuais | `site` e `backend` | Console da AWS e código da aplicação |
 | Construir IaC quando ela entrar na trilha | `infrastructure/terraform` | Terraform |
 
-Não existem profiles Terraform por sprint. Os pontos de entrada ficam somente
-nos baselines do catch-up.
+Os baselines são pontos de entrada do catch-up. As root stacks Terraform têm
+execução independente; não existem profiles Terraform por sprint.
 
 ## Catch-up para quem entra na Sprint 2
 
@@ -83,26 +86,30 @@ momento em que passa a fazer parte do conteúdo e evolui no mesmo diretório nas
 sprints seguintes. O state continua independente por stack:
 
 ```text
-residencia-foundation/01-web-edge.tfstate
-residencia-foundation/02-identity.tfstate
-residencia-foundation/03-marketplace-api.tfstate
+00-remote-backend-stack/terraform.tfstate                  # local, fora do Git
+residencia-foundation/01-frontend-stack.tfstate            # remoto, no S3
 ```
 
-Uma stack é executada explicitamente, sem associá-la a um baseline:
+Uma stack é executada explicitamente, sem associá-la a um baseline. Comece pela
+stack do bucket de state: preencha `versions.tf` com o provider do roteiro antes
+do `init`. Depois implemente os recursos antes de planejar e aplicar:
 
 ```bash
-RESIDENCIA_STATE_BUCKET=meu-state-bucket \
-  ./infrastructure/terraform/bootstrap.sh apply 01-web-edge
+cd infrastructure/terraform/stacks/00-remote-backend-stack
+terraform init
 ```
 
-Ao chegar à sprint que introduz Terraform, remova primeiro o ambiente equivalente
-criado pelo catch-up. CloudFormation e Terraform não devem administrar os mesmos
-recursos simultaneamente. Consulte
+Na Sprint 5, crie primeiro o bucket de state pela `00-remote-backend-stack` e
+depois uma camada web nova pela `01-frontend-stack`. O clone traz todos os
+arquivos, apenas com comentários. Preencha versões, provider e recursos
+pelo roteiro, com valores literais; variables é o opcional 1. Não há imports nem
+adoção do ambiente anterior. Consulte
 [infrastructure/terraform/README.md](infrastructure/terraform/README.md) para a
 convenção das root stacks e do state.
 
-Fazer checkout de uma tag não altera a conta AWS. Antes de voltar para uma tag
-anterior, remova o baseline ou as stacks atualmente provisionadas.
+Fazer checkout de uma tag não altera nem limpa a conta AWS. Para remover um
+laboratório, confira primeiro quais recursos você criou e use o procedimento
+de limpeza correspondente, sem afetar ambientes das sprints anteriores.
 
 ## Sprint 1: criar seu fork
 
@@ -221,5 +228,11 @@ Depois de publicados na main, eles executam nos pushes e por disparo manual.
 
 Para entrar na Sprint 4 com o resultado até a Sprint 3, consulte o
 [catch-up ready-for-sprint-04](infrastructure/catch-up/README.md).
+Para entrar na Sprint 5 com esse ambiente e a configuração AWS das pipelines,
+use `ready-for-sprint-05`, incluindo o subject OIDC exato do seu fork. O bootstrap
+gera o arquivo das Repository Variables; a importação no GitHub é explícita.
+DynamoDB é o padrão do catch-up. RDS/Proxy só são criados com
+`CATCH_UP_DATA_SOURCE=rds` e uma versão PostgreSQL explícita; não são necessários
+para preparar as permissões AWS das pipelines.
 O comando `plan` valida localmente; `apply` cria/atualiza recursos pagos e
 precisa ser executado conscientemente na conta do laboratório.

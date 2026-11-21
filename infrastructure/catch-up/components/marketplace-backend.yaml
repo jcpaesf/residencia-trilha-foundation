@@ -3,6 +3,10 @@ Transform: AWS::Serverless-2016-10-31
 Description: Catch-up da Sprint 2 da Trilha Foundation (Cognito, API, Lambdas, DynamoDB, S3 e SQS).
 
 Parameters:
+  ResourceNamePrefix:
+    Type: String
+    Default: residencia-fdn
+    AllowedPattern: '^[a-z][a-z0-9-]{1,23}$'
   AllowedOrigin:
     Type: String
     Description: Origem HTTPS do frontend autorizada no CORS.
@@ -62,7 +66,7 @@ Resources:
   ProductImagesBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "residencia-fdn-images-${AWS::AccountId}-${AWS::Region}"
+      BucketName: !Sub "${ResourceNamePrefix}-images-${AWS::AccountId}-${AWS::Region}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -109,7 +113,7 @@ Resources:
   CatalogFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: residencia-fdn-catalog-api
+      FunctionName: !Sub ${ResourceNamePrefix}-catalog-api
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.handler
@@ -141,8 +145,13 @@ Resources:
 
   OrderApiFunction:
     Type: AWS::Serverless::Function
+    # Runtime da aplicacao existente; migracao tratada separadamente.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W2531]
     Properties:
-      FunctionName: residencia-fdn-order-api
+      FunctionName: !Sub ${ResourceNamePrefix}-order-api
       Runtime: dotnet8
       Architectures: [arm64]
       Handler: Residencia.Foundation.Orders::Residencia.Foundation.Orders.Function::FunctionHandler
@@ -170,7 +179,7 @@ Resources:
   OrderProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: residencia-fdn-order-processor
+      FunctionName: !Sub ${ResourceNamePrefix}-order-processor
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.handler
@@ -187,6 +196,14 @@ Resources:
             FunctionResponseTypes: [ReportBatchItemFailures]
 
 Outputs:
+  DataSource:
+    Value: dynamodb
+  CatalogFunctionName:
+    Value: !Ref CatalogFunction
+  OrderApiFunctionName:
+    Value: !Ref OrderApiFunction
+  OrderProcessorFunctionName:
+    Value: !Ref OrderProcessorFunction
   ApiUrl:
     Value: !Sub "https://${MarketplaceApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
   UserPoolId:

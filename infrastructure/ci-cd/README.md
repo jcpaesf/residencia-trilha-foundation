@@ -92,12 +92,20 @@ ou schema é outro procedimento revisado, não uma permissão extra nessa role.
 ### SAM e catch-up
 
 O template [marketplace-backend-rds.yaml](../catch-up/components/marketplace-backend-rds.yaml)
-define a infraestrutura da Sprint 3, incluindo integrações API/SQS e acesso ao
-Proxy. O [bootstrap](../catch-up/README.md) provisiona e
-inicializa esse ambiente. SAM não importa automaticamente recursos manuais.
+define o opcional SQL, incluindo integrações API/SQS e acesso ao Proxy.
+O [bootstrap](../catch-up/README.md) usa DynamoDB por padrão; somente
+`CATCH_UP_DATA_SOURCE=rds` cria RDS/Proxy e inicializa o SQL.
+SAM não importa automaticamente recursos manuais.
 Se você fez a Sprint 3 pelo console, use os nomes existentes na pipeline; não
-rode catch-up por cima deles. Os nomes das funções do laboratório são fixos,
-portanto duas cópias do catch-up na mesma região/conta podem conflitar.
+rode catch-up por cima deles. Nos baselines 04/05, `CATCH_UP_RESOURCE_PREFIX`
+permite isolar os nomes das funções e do bucket de imagens; o padrão continua
+`residencia-fdn`. Apenas mudar o prefixo das stacks não isola esses recursos.
+
+Para começar a Sprint 5 sem implementar manualmente a Sprint 4, use o baseline
+`ready-for-sprint-05`: além do backend DynamoDB padrão, ele prepara o provider OIDC (ou reutiliza
+o existente), as duas roles restritas e os valores das Repository Variables.
+Os workflows já estão em `.github/workflows/`; o catch-up não os executa nem
+configura o GitHub automaticamente. Siga as instruções do [catch-up](../catch-up/README.md).
 
 Após publicar código por pipeline, reaplicar o template SAM pode republicar os
 ZIPs locais e sobrescrever essa release. Revise sempre antes de reaplicar.

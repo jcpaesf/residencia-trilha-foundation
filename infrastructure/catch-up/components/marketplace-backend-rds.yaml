@@ -3,6 +3,11 @@ Transform: AWS::Serverless-2016-10-31
 Description: Catch-up ate a Sprint 3, preservando os recursos da Sprint 2 e acrescentando PostgreSQL privado.
 
 Parameters:
+  ResourceNamePrefix:
+    Type: String
+    Default: residencia-fdn
+    AllowedPattern: '^[a-z][a-z0-9-]{1,23}$'
+    Description: Prefixo dos nomes das Lambdas e imagens; mude para isolar um laboratorio novo.
   PostgresVersion:
     Type: String
     Description: Versao PostgreSQL 16 disponivel na regiao e suportada por RDS Proxy.
@@ -72,7 +77,7 @@ Resources:
   ProductImagesBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "residencia-fdn-images-${AWS::AccountId}-${AWS::Region}"
+      BucketName: !Sub "${ResourceNamePrefix}-images-${AWS::AccountId}-${AWS::Region}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -119,7 +124,7 @@ Resources:
   CatalogFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: residencia-fdn-catalog-api
+      FunctionName: !Sub "${ResourceNamePrefix}-catalog-api"
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.handler
@@ -154,8 +159,14 @@ Resources:
 
   OrderApiFunction:
     Type: AWS::Serverless::Function
+    # Mantem o runtime do codigo existente. .NET 8 esta depreciado desde 10/11/2026,
+    # mas a AWS ainda permite sua criacao. Migracao para .NET 10 e uma mudanca separada.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W2531]
     Properties:
-      FunctionName: residencia-fdn-order-api
+      FunctionName: !Sub "${ResourceNamePrefix}-order-api"
       Runtime: dotnet8
       Architectures: [arm64]
       Handler: Residencia.Foundation.Orders::Residencia.Foundation.Orders.Function::FunctionHandler
@@ -186,7 +197,7 @@ Resources:
   OrderProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: residencia-fdn-order-processor
+      FunctionName: !Sub "${ResourceNamePrefix}-order-processor"
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.handler
@@ -390,6 +401,8 @@ Resources:
             SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
 
 Outputs:
+  DataSource:
+    Value: rds
   ApiUrl:
     Value: !Sub "https://${MarketplaceApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
   UserPoolId:

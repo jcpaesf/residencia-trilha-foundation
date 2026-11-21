@@ -1,0 +1,7 @@
+name: ready-for-sprint-05
+description: Ambiente funcional ate a Sprint 4, com DynamoDB por padrao e identidade AWS das pipelines
+components:
+  - web-edge
+  - marketplace-backend
+  - pipeline-identity
+publish_frontend: true

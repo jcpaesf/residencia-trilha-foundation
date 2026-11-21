@@ -10,7 +10,8 @@ Uso:
 Baseline disponivel:
   ready-for-sprint-02  Prepara o resultado funcional da Sprint 1
   ready-for-sprint-03  Prepara o resultado funcional da Sprint 2
-  ready-for-sprint-04  Prepara o resultado funcional da Sprint 3 (RDS/Proxy/VPC)
+  ready-for-sprint-04  Prepara o resultado funcional da Sprint 3 (DynamoDB por padrao)
+  ready-for-sprint-05  Prepara a Sprint 4 (DynamoDB + OIDC/roles das pipelines)
 
 Alias temporario:
   sprint-01            Compatibilidade com a primeira versao do script
@@ -20,6 +21,10 @@ Variaveis opcionais:
   AWS_REGION             Regiao das stacks (padrao: us-east-1)
   CATCH_UP_STACK_PREFIX  Prefixo das stacks (padrao: residencia-foundation-catch-up)
   CATCH_UP_ARTIFACTS_BUCKET  Bucket de pacotes das Lambdas (opcional)
+  CATCH_UP_RESOURCE_PREFIX  Prefixo de Lambdas/imagens (padrao: residencia-fdn)
+  CATCH_UP_DATA_SOURCE      dynamodb (padrao) ou rds (opt-in, somente baselines 04/05)
+  CATCH_UP_GITHUB_REPO     OWNER/REPO do fork (obrigatorio para apply do baseline 05)
+  CATCH_UP_GITHUB_SUB      Subject OIDC exato do fork, restrito a main (baseline 05)
 
 Exemplos:
   AWS_PROFILE=aluno ./infrastructure/catch-up/bootstrap.sh apply ready-for-sprint-02
@@ -57,9 +62,17 @@ baseline_path="${script_dir}/baselines/${baseline}.yaml"
 region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 stack_prefix="${CATCH_UP_STACK_PREFIX:-residencia-foundation-catch-up}"
 artifacts_bucket="${CATCH_UP_ARTIFACTS_BUCKET:-}"
+resource_prefix="${CATCH_UP_RESOURCE_PREFIX:-residencia-fdn}"
+data_source="${CATCH_UP_DATA_SOURCE:-dynamodb}"
+existing_oidc_provider=""
 
 [[ -f "$baseline_path" ]] || fail "baseline nao encontrado: $baseline"
 [[ "$stack_prefix" =~ ^[a-z][a-z0-9-]{1,35}$ ]] || fail "prefixo invalido: use 2 a 36 caracteres minusculos, numeros e hifens"
+[[ "$resource_prefix" =~ ^[a-z][a-z0-9-]{1,23}$ ]] || fail "CATCH_UP_RESOURCE_PREFIX invalido: use 2 a 24 caracteres minusculos, numeros e hifens"
+[[ "$data_source" == dynamodb || "$data_source" == rds ]] || fail "CATCH_UP_DATA_SOURCE deve ser dynamodb ou rds"
+if [[ "$data_source" == rds && "$baseline" != ready-for-sprint-04 && "$baseline" != ready-for-sprint-05 ]]; then
+  fail "RDS e opt-in somente nos baselines ready-for-sprint-04 e ready-for-sprint-05"
+fi
 export AWS_PAGER=''
 
 components="$({
@@ -84,6 +97,38 @@ aws_args=(--region "$region")
 if [[ -n "${AWS_PROFILE:-}" ]]; then
   aws_args+=(--profile "$AWS_PROFILE")
 fi
+
+uses_rds() {
+  [[ "$data_source" == rds ]]
+}
+
+prepare_pipeline_identity() {
+  : "${CATCH_UP_GITHUB_REPO:?Informe OWNER/REPO do fork}"
+  : "${CATCH_UP_GITHUB_SUB:?Informe o subject OIDC exato, incluindo IDs imutaveis quando usados}"
+  node "${script_dir}/repository-variables.mjs" validate-subject "$CATCH_UP_GITHUB_REPO" "$CATCH_UP_GITHUB_SUB"
+  existing_oidc_provider="$(aws iam list-open-id-connect-providers \
+    --query "OpenIDConnectProviderList[?ends_with(Arn, '/token.actions.githubusercontent.com')].Arn | [0]" \
+    --output text "${aws_args[@]}")"
+  if [[ "$existing_oidc_provider" == None ]]; then
+    existing_oidc_provider=""
+    echo "O provider OIDC do GitHub sera criado e preservado na exclusao da stack."
+  else
+    [[ "$(aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$existing_oidc_provider" \
+      --query 'contains(ClientIDList, `sts.amazonaws.com`)' --output text "${aws_args[@]}")" == True ]] || \
+      fail "Provider compartilhado sem audience sts.amazonaws.com; revise-o manualmente, sem sobrescrever sua configuracao"
+    echo "Reutilizando provider OIDC existente; sua configuracao nao sera alterada."
+    local owned_provider
+    owned_provider="$(aws cloudformation describe-stack-resource \
+      --stack-name "$(component_stack_name pipeline-identity)" \
+      --logical-resource-id GitHubOidcProvider \
+      --query 'StackResourceDetail.PhysicalResourceId' --output text "${aws_args[@]}" 2>/dev/null || true)"
+    if [[ "$owned_provider" == "$existing_oidc_provider" ]]; then
+      # Em reaplicacoes, mantenha o recurso sob o gerenciamento da propria stack.
+      existing_oidc_provider=""
+      echo "O provider ja pertence a esta stack; sua propriedade sera preservada."
+    fi
+  fi
+}
 
 component_stack_name() {
   local component="$1"
@@ -222,11 +267,12 @@ apply_component() {
   local parameters=()
   stack_name="$(component_stack_name "$component")"
 
-  if [[ "$component" == marketplace-backend && "$baseline" == ready-for-sprint-04 ]]; then
+  if [[ "$component" == marketplace-backend ]] && uses_rds; then
     template_path="${script_dir}/components/marketplace-backend-rds.yaml"
     deploy_template="$template_path"
     parameters+=("PostgresVersion=$CATCH_UP_POSTGRES_VERSION")
   fi
+  if [[ "$component" == marketplace-backend ]]; then parameters+=("ResourceNamePrefix=$resource_prefix"); fi
 
   [[ -f "$template_path" ]] || fail "componente nao encontrado: $component"
 
@@ -246,6 +292,18 @@ apply_component() {
     parameters+=("AllowedOrigin=${allowed_origin}")
   fi
 
+  if [[ "$component" == pipeline-identity ]]; then
+    local web_stack backend_stack
+    web_stack="$(component_stack_name web-edge)"
+    backend_stack="$(component_stack_name marketplace-backend)"
+    parameters+=("GitHubSubject=$CATCH_UP_GITHUB_SUB" "ExistingOidcProviderArn=$existing_oidc_provider")
+    parameters+=("FrontendBucketName=$(stack_output "$web_stack" FrontendBucketName)")
+    parameters+=("DistributionId=$(stack_output "$web_stack" CloudFrontDistributionId)")
+    parameters+=("CatalogFunctionName=$(stack_output "$backend_stack" CatalogFunctionName)")
+    parameters+=("OrderApiFunctionName=$(stack_output "$backend_stack" OrderApiFunctionName)")
+    parameters+=("OrderProcessorFunctionName=$(stack_output "$backend_stack" OrderProcessorFunctionName)")
+  fi
+
   echo "Criando ou atualizando o componente $component..."
   if [[ "$component" == "marketplace-backend" ]]; then
     run_with_stack_events "$stack_name" \
@@ -258,6 +316,15 @@ apply_component() {
         --tags ManagedBy=residencia-catch-up Baseline="$baseline" Component="$component" \
         "${aws_args[@]}"
     rm -f "$packaged_template"
+  elif [[ "$component" == pipeline-identity ]]; then
+    run_with_stack_events "$stack_name" \
+      aws cloudformation deploy \
+        --stack-name "$stack_name" --template-file "$deploy_template" \
+        --parameter-overrides "${parameters[@]}" \
+        --capabilities CAPABILITY_IAM \
+        --no-fail-on-empty-changeset \
+        --tags ManagedBy=residencia-catch-up Baseline="$baseline" Component="$component" \
+        "${aws_args[@]}"
   else
     run_with_stack_events "$stack_name" \
       aws cloudformation deploy \
@@ -333,6 +400,7 @@ show_status() {
   local status
 
   echo "Baseline: $baseline"
+  echo "Backend solicitado: $data_source (RDS somente com CATCH_UP_DATA_SOURCE=rds)"
   while IFS= read -r component; do
     stack_name="$(component_stack_name "$component")"
     status="$(aws cloudformation describe-stacks \
@@ -352,6 +420,23 @@ show_status() {
     echo "API: $(stack_output "$stack_name" ApiUrl)"
     echo "Cognito user pool: $(stack_output "$stack_name" UserPoolId)"
   fi
+  if grep -qx "pipeline-identity" <<< "$components"; then
+    stack_name="$(component_stack_name pipeline-identity)"
+    echo "Role frontend: $(stack_output "$stack_name" FrontendDeployRoleArn)"
+    echo "Role backend: $(stack_output "$stack_name" BackendDeployRoleArn)"
+  fi
+}
+
+write_repository_variables() {
+  local output_dir="${repository_dir}/build/catch-up/${stack_prefix}"
+  local web_outputs backend_outputs identity_outputs
+  web_outputs="$(aws cloudformation describe-stacks --stack-name "$(component_stack_name web-edge)" --query 'Stacks[0].Outputs' --output json "${aws_args[@]}")"
+  backend_outputs="$(aws cloudformation describe-stacks --stack-name "$(component_stack_name marketplace-backend)" --query 'Stacks[0].Outputs' --output json "${aws_args[@]}")"
+  identity_outputs="$(aws cloudformation describe-stacks --stack-name "$(component_stack_name pipeline-identity)" --query 'Stacks[0].Outputs' --output json "${aws_args[@]}")"
+  node "${script_dir}/repository-variables.mjs" write "$output_dir" "$region" "$web_outputs" "$backend_outputs" "$identity_outputs"
+  echo "AWS pronta. Para configurar o fork, com gh autenticado, execute:"
+  printf 'gh variable set --repo %q --env-file %q\n' "$CATCH_UP_GITHUB_REPO" "${output_dir}/repository-variables.env"
+  echo "O catch-up nao altera o GitHub nem dispara workflows automaticamente."
 }
 
 assert_baseline_ready() {
@@ -475,35 +560,39 @@ case "$action" in
     command -v sam >/dev/null || fail "Instale AWS SAM CLI atualizado para validar os templates"
     while IFS= read -r component; do
       template="${script_dir}/components/${component}.yaml"
-      if [[ "$component" == marketplace-backend && "$baseline" == ready-for-sprint-04 ]]; then template="${script_dir}/components/marketplace-backend-rds.yaml"; fi
+      if [[ "$component" == marketplace-backend ]] && uses_rds; then template="${script_dir}/components/marketplace-backend-rds.yaml"; fi
       sam validate --lint --region "$region" --template-file "$template"
       echo "Componente: $component; stack: $(component_stack_name "$component")"
     done <<< "$components"
-    echo 'Validacao local apenas. Nao cria change set nem consulta drift. RDS/Proxy/endpoints geram custos.'
+    echo "Backend: $data_source. Validacao local apenas; nao cria change set nem consulta drift."
+    if uses_rds; then echo 'ATENCAO: opt-in RDS selecionado; RDS/Proxy/endpoints geram custos.'; fi
     ;;
   apply)
     aws sts get-caller-identity "${aws_args[@]}" >/dev/null
-    if [[ "$baseline" == ready-for-sprint-04 ]]; then
+    if [[ "$baseline" == ready-for-sprint-04 || "$baseline" == ready-for-sprint-05 ]]; then
       for dependency in node npm dotnet zip sam; do command -v "$dependency" >/dev/null || fail "Falta $dependency"; done
       [[ "$(node -p 'process.versions.node.split(".")[0]')" == 24 ]] || fail "Use Node.js 24"
       : "${CATCH_UP_EXPECTED_ACCOUNT_ID:?Informe a conta que deve receber o laboratorio}"
-      : "${CATCH_UP_POSTGRES_VERSION:?Informe uma versao PostgreSQL 16 suportada por RDS Proxy na regiao}"
       [[ "$(aws sts get-caller-identity --query Account --output text "${aws_args[@]}")" == "$CATCH_UP_EXPECTED_ACCOUNT_ID" ]] || fail "Conta diferente da esperada"
-      [[ "$CATCH_UP_POSTGRES_VERSION" == 16.* ]] || fail "Use PostgreSQL 16"
-      [[ "$(aws rds describe-db-engine-versions --engine postgres --engine-version "$CATCH_UP_POSTGRES_VERSION" --query 'DBEngineVersions[0].EngineVersion' --output text "${aws_args[@]}")" == "$CATCH_UP_POSTGRES_VERSION" ]] || fail "Versao indisponivel na regiao"
+      if uses_rds; then
+        : "${CATCH_UP_POSTGRES_VERSION:?Informe uma versao PostgreSQL 16 suportada por RDS Proxy na regiao}"
+        [[ "$CATCH_UP_POSTGRES_VERSION" == 16.* ]] || fail "Use PostgreSQL 16"
+        [[ "$(aws rds describe-db-engine-versions --engine postgres --engine-version "$CATCH_UP_POSTGRES_VERSION" --query 'DBEngineVersions[0].EngineVersion' --output text "${aws_args[@]}")" == "$CATCH_UP_POSTGRES_VERSION" ]] || fail "Versao indisponivel na regiao"
+      fi
       bash "$0" plan "$baseline"
     fi
-    # Impede aplicar o baseline antigo por cima do RDS e remover a rede/banco.
-    if [[ "$baseline" == ready-for-sprint-03 ]]; then
+    if [[ "$baseline" == ready-for-sprint-05 ]]; then prepare_pipeline_identity; fi
+    # Mudar o default nao pode remover um RDS ja existente por acidente.
+    if ! uses_rds && grep -qx "marketplace-backend" <<< "$components"; then
       database="$(stack_output "$(component_stack_name marketplace-backend)" DatabaseProxyEndpoint 2>/dev/null || true)"
-      [[ -z "$database" || "$database" == None ]] || fail "Este ambiente ja usa RDS. Nao aplique ready-for-sprint-03 por cima dele."
+      [[ -z "$database" || "$database" == None ]] || fail "Este ambiente ja usa RDS. Nao sera convertido para DynamoDB automaticamente. Preserve CATCH_UP_DATA_SOURCE=rds ou use outro prefixo para um laboratorio novo."
     fi
     while IFS= read -r component; do
       apply_component "$component"
     done <<< "$components"
     assert_baseline_ready
 
-    if [[ "$baseline" == ready-for-sprint-04 ]]; then initialize_schema; fi
+    if uses_rds; then initialize_schema; fi
 
     if [[ "$publish_frontend" == "true" ]]; then
       grep -qx "web-edge" <<< "$components" || fail \
@@ -512,6 +601,7 @@ case "$action" in
     fi
 
     assert_baseline_ready
+    if [[ "$baseline" == ready-for-sprint-05 ]]; then write_repository_variables; fi
     echo
     echo "Catch-up concluido."
     show_status
@@ -521,7 +611,7 @@ case "$action" in
     ;;
   destroy)
     database="$(stack_output "$(component_stack_name marketplace-backend)" DatabaseProxyEndpoint 2>/dev/null || true)"
-    [[ "$baseline" != ready-for-sprint-04 && ( -z "$database" || "$database" == None ) ]] || fail "Ambiente RDS: remocao automatica bloqueada. Revise snapshots, buckets e dados conforme README."
+    if uses_rds || [[ -n "$database" && "$database" != None ]]; then fail "Ambiente RDS: remocao automatica bloqueada. Revise snapshots, buckets e dados conforme README."; fi
     aws sts get-caller-identity "${aws_args[@]}" >/dev/null
     while IFS= read -r component; do
       destroy_component "$component"

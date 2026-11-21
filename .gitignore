@@ -10,3 +10,10 @@ obj/
 .env.local
 .DS_Store
 *.log
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.tfbackend

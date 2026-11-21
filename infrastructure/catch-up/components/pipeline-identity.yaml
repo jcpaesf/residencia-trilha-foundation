@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: OIDC GitHub e roles restritas para as pipelines da Sprint 4.
+
+Parameters:
+  GitHubSubject:
+    Type: String
+    AllowedPattern: '^repo:[^*? ]+:ref:refs/heads/main$'
+    Description: Subject OIDC exato do fork, incluindo IDs imutaveis quando usados; somente main.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+    Description: Provider existente a reutilizar; vazio cria um novo e o preserva na exclusao.
+  FrontendBucketName:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  DistributionId:
+    Type: String
+    AllowedPattern: '^[A-Z0-9]{1,32}$'
+  CatalogFunctionName:
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9_-]{1,64}$'
+  OrderApiFunctionName:
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9_-]{1,64}$'
+  OrderProcessorFunctionName:
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9_-]{1,64}$'
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      Tags:
+        - Key: ManagedBy
+          Value: residencia-catch-up
+        - Key: Component
+          Value: pipeline-identity
+        - Key: CatchUpStack
+          Value: !Ref AWS::StackName
+
+  FrontendDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Deploy do frontend somente no bucket e distribuicao deste catch-up.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: DeployFrontend
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}/*
+              - Effect: Allow
+                Action: [cloudfront:CreateInvalidation, cloudfront:GetInvalidation]
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}
+
+  BackendDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Deploy somente do codigo das tres Lambdas deste catch-up.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: DeployThreeLambdas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [lambda:GetFunction, lambda:GetFunctionConfiguration, lambda:UpdateFunctionCode]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${CatalogFunctionName}
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${OrderApiFunctionName}
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${OrderProcessorFunctionName}
+
+Outputs:
+  FrontendDeployRoleArn:
+    Value: !GetAtt FrontendDeployRole.Arn
+  BackendDeployRoleArn:
+    Value: !GetAtt BackendDeployRole.Arn
+  GitHubOidcProviderArn:
+    Value: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
